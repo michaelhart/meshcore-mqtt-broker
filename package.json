@@ -1,0 +1,36 @@
+{
+  "name": "meshcore-mqtt-broker",
+  "version": "1.0.0",
+  "description": "MeshCore MQTT broker with public key authentication",
+  "type": "module",
+  "main": "dist/server.js",
+  "scripts": {
+    "dev": "node --loader ts-node/esm src/server.ts",
+    "build": "tsc",
+    "start": "tsx src/server.ts"
+  },
+  "keywords": [
+    "meshcore",
+    "mqtt",
+    "broker"
+  ],
+  "author": "Michael Hart <michaelhart@michaelhart.me> (https://github.com/michaelhart)",
+  "license": "MIT",
+  "dependencies": {
+    "@michaelhart/meshcore-decoder": "^0.2.1",
+    "aedes": "^0.51.3",
+    "airport-utils": "^1.0.23",
+    "dotenv": "^17.2.3",
+    "ini": "^5.0.0",
+    "tsx": "^4.19.2",
+    "websocket-stream": "^5.5.2",
+    "ws": "^8.18.3"
+  },
+  "devDependencies": {
+    "@types/ini": "^4.1.1",
+    "@types/node": "^24.7.0",
+    "@types/ws": "^8.18.1",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.9.3"
+  }
+}
