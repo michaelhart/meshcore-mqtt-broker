@@ -94,6 +94,7 @@ aedes.authenticate = async (client, username, password, callback) => {
     // Validate public key format (should be 64 hex characters)
     if (!/^[0-9A-F]{64}$/i.test(publicKey)) {
       console.log(`[AUTH] Invalid public key format: ${publicKey}`);
+      console.log(`[AUTH] Public key length: ${publicKey.length}, hex dump: ${Buffer.from(publicKey).toString('hex')}`);
       callback(null, false);
       return;
     }
