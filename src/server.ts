@@ -89,7 +89,7 @@ aedes.authenticate = async (client, username, password, callback) => {
       return;
     }
 
-    const publicKey = usernameStr.substring(3).toUpperCase();
+    const publicKey = usernameStr.substring(3).toUpperCase().trim();
     
     // Validate public key format (should be 64 hex characters)
     if (!/^[0-9A-F]{64}$/i.test(publicKey)) {
