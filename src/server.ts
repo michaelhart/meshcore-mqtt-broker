@@ -336,12 +336,11 @@ wsServer.on('connection', (ws) => {
     write(chunk, encoding, callback) {
       if (ws.readyState === ws.OPEN) {
         ws.send(chunk, (error) => {
-          if (error) {
+          // Suppress EPIPE errors - they're expected when client disconnects
+          if (error && (error as any).code !== 'EPIPE') {
             console.error('[WEBSOCKET] Send error:', error);
-            callback(error);
-          } else {
-            callback();
           }
+          callback(error);
         });
       } else {
         callback(new Error('WebSocket not open'));
