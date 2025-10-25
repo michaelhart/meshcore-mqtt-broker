@@ -177,19 +177,21 @@ aedes.authorizePublish = (client, packet, callback) => {
     // Supported formats:
     //   meshcore/{IATA}/subtopic (e.g., meshcore/SEA/packets)
     //   meshcore/{IATA}/{PUBLIC_KEY}/subtopic (e.g., meshcore/SEA/ABCD1234.../packets)
-    const topicParts = packet.topic.split('/');
+    const topicParts = packet.topic.split('/').map(part => part.trim());
     if (topicParts.length < 3) {
       console.log(`${logPrefix} [AUTHZ] ✗ Publish denied -> ${packet.topic} (must be meshcore/AIRPORT/subtopic format)`);
       callback(new Error('Topic must be meshcore/AIRPORT/subtopic or meshcore/AIRPORT/PUBKEY/subtopic format'));
       return;
     }
     
-    const locationCode = topicParts[1];
+    const locationCode = topicParts[1].trim();
     const iataRegex = /^[A-Z]{3}$/;
     
     // Reject XXX explicitly (default placeholder value)
     if (locationCode === 'XXX') {
       console.log(`${logPrefix} [AUTHZ] ✗ Publish denied -> ${packet.topic} (XXX not valid, configure actual IATA)`);
+      console.log(`${logPrefix} [DISCONNECT] Closing client - Invalid location code: XXX`);
+      console.log(`${logPrefix} [DISCONNECT] Full topic: "${packet.topic}"`);
       callback(new Error('XXX is a placeholder - please configure your actual IATA location code'));
       client.close();
       return;
@@ -202,7 +204,11 @@ aedes.authorizePublish = (client, packet, callback) => {
     } else {
       // First check format (must be 3 uppercase letters, no normalization)
       if (!iataRegex.test(locationCode)) {
-        console.log(`${logPrefix} [AUTHZ] ✗ Publish denied -> ${packet.topic} (invalid format: ${locationCode})`);
+        console.log(`${logPrefix} [AUTHZ] ✗ Publish denied -> ${packet.topic} (invalid format)`);
+        console.log(`${logPrefix} [DISCONNECT] Closing client - Invalid location format`);
+        console.log(`${logPrefix} [DISCONNECT] Location code: "${locationCode}" (length: ${locationCode.length})`);
+        console.log(`${logPrefix} [DISCONNECT] Location hex: ${Buffer.from(locationCode).toString('hex')}`);
+        console.log(`${logPrefix} [DISCONNECT] Full topic: "${packet.topic}"`);
         callback(new Error('Location must be exactly 3 uppercase letters (e.g., SEA, PDX, BOS) or "test"'));
         client.close();
         return;
@@ -210,7 +216,10 @@ aedes.authorizePublish = (client, packet, callback) => {
       
       // Then check if it's a valid IATA code
       if (!isValidIATACode(locationCode)) {
-        console.log(`${logPrefix} [AUTHZ] ✗ Publish denied -> ${packet.topic} (invalid IATA: ${locationCode})`);
+        console.log(`${logPrefix} [AUTHZ] ✗ Publish denied -> ${packet.topic} (invalid IATA)`);
+        console.log(`${logPrefix} [DISCONNECT] Closing client - Invalid IATA code`);
+        console.log(`${logPrefix} [DISCONNECT] Location code: "${locationCode}"`);
+        console.log(`${logPrefix} [DISCONNECT] Full topic: "${packet.topic}"`);
         callback(new Error('Location must be a valid IATA international airport code or "test"'));
         client.close();
         return;
@@ -219,11 +228,15 @@ aedes.authorizePublish = (client, packet, callback) => {
     
     // Check if topic includes public key (4 parts = meshcore/IATA/PUBKEY/subtopic)
     if (topicParts.length >= 4) {
-      const topicPublicKey = topicParts[2].toUpperCase();
+      const topicPublicKey = topicParts[2].trim().toUpperCase();
       
       // Validate it looks like a public key (64 hex chars)
       if (!/^[0-9A-F]{64}$/i.test(topicPublicKey)) {
-        console.log(`${logPrefix} [AUTHZ] ✗ Publish denied -> ${packet.topic} (invalid pubkey format: ${topicPublicKey})`);
+        console.log(`${logPrefix} [AUTHZ] ✗ Publish denied -> ${packet.topic} (invalid pubkey format)`);
+        console.log(`${logPrefix} [DISCONNECT] Closing client - Invalid public key format in topic`);
+        console.log(`${logPrefix} [DISCONNECT] Topic pubkey: "${topicPublicKey}" (length: ${topicPublicKey.length})`);
+        console.log(`${logPrefix} [DISCONNECT] Topic pubkey hex: ${Buffer.from(topicPublicKey).toString('hex')}`);
+        console.log(`${logPrefix} [DISCONNECT] Full topic: "${packet.topic}"`);
         callback(new Error('Public key in topic must be 64 hex characters'));
         client.close();
         return;
@@ -233,6 +246,10 @@ aedes.authorizePublish = (client, packet, callback) => {
       const clientPublicKey = (client as any).publicKey.toUpperCase();
       if (topicPublicKey !== clientPublicKey) {
         console.log(`${logPrefix} [AUTHZ] ✗ Publish denied -> ${packet.topic} (pubkey mismatch)`);
+        console.log(`${logPrefix} [DISCONNECT] Closing client - Public key mismatch`);
+        console.log(`${logPrefix} [DISCONNECT] Topic pubkey:  "${topicPublicKey}"`);
+        console.log(`${logPrefix} [DISCONNECT] Client pubkey: "${clientPublicKey}"`);
+        console.log(`${logPrefix} [DISCONNECT] Full topic: "${packet.topic}"`);
         callback(new Error('Public key in topic must match authenticated public key'));
         client.close();
         return;
@@ -288,7 +305,9 @@ aedes.authorizeSubscribe = (client, subscription, callback) => {
   // Publisher clients cannot subscribe (publish-only)
   if (clientType === ClientType.PUBLISHER) {
     console.log(`${logPrefix} [AUTHZ] ✗ Subscribe denied (publisher) -> ${subscription.topic}`);
+    console.log(`${logPrefix} [DISCONNECT] Closing client - Publishers cannot subscribe`);
     callback(new Error('Publisher clients are publish-only'));
+    client.close();
     return;
   }
   
@@ -399,19 +418,26 @@ wsServer.on('connection', (ws) => {
   });
 
   // Handle WebSocket close
-  ws.on('close', () => {
+  ws.on('close', (code, reason) => {
     const clientInfo = (stream as any).client;
     if (clientInfo) {
       const logPrefix = getClientLogPrefix(clientInfo);
-      console.log(`${logPrefix} [WEBSOCKET] Connection closed`);
+      console.log(`${logPrefix} [WEBSOCKET] Connection closed - Code: ${code}, Reason: ${reason.toString() || 'none'}`);
     } else {
-      console.log('[WEBSOCKET] Connection closed (unauthenticated)');
+      console.log(`[WEBSOCKET] Connection closed (unauthenticated) - Code: ${code}, Reason: ${reason.toString() || 'none'}`);
     }
     stream.push(null);
   });
 
   // Handle stream end
   stream.on('end', () => {
+    const clientInfo = (stream as any).client;
+    if (clientInfo) {
+      const logPrefix = getClientLogPrefix(clientInfo);
+      console.log(`${logPrefix} [STREAM] Stream ended, closing WebSocket`);
+    } else {
+      console.log('[STREAM] Stream ended (unauthenticated), closing WebSocket');
+    }
     ws.close();
   });
 
