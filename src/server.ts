@@ -133,9 +133,14 @@ aedes.authenticate = async (client, username, password, callback) => {
 
     // Verify the auth token using meshcore-decoder
     const tokenPayload = await verifyAuthToken(passwordStr, publicKey);
+    console.debug(`${logPrefix} [AUTH] Token input: "${passwordStr}"`);
+
     
     if (!tokenPayload) {
       console.log(`${logPrefix} [AUTH] ✗ Invalid token signature`);
+      console.debug(`${logPrefix} [AUTH] Token input: "${passwordStr}"`);      
+      console.debug(`${logPrefix} [AUTH] Public key: ${publicKey}`);
+      console.debug(`${logPrefix} [AUTH] Token hex: ${Buffer.from(passwordStr).toString('hex')}`);
       callback(null, false);
       return;
     }
@@ -351,11 +356,17 @@ aedes.on('client', (client) => {
   
   const logPrefix = getClientLogPrefix(client);
   console.log(`${logPrefix} [CLIENT] Connected`);
+  console.log(`${logPrefix} [CLIENT] Connection details - conn exists: ${!!(client as any).conn}, clientIP: ${(client as any).conn?.clientIP}`);
 });
 
 aedes.on('clientDisconnect', (client) => {
   const logPrefix = getClientLogPrefix(client);
   console.log(`${logPrefix} [CLIENT] Disconnected`);
+  
+  // Log additional info to debug why this client disconnected
+  if (client) {
+    console.log(`${logPrefix} [CLIENT] Disconnect details - clientType: ${(client as any).clientType}, publicKey: ${(client as any).publicKey?.substring(0, 8)}`);
+  }
 });
 
 aedes.on('publish', (packet, client) => {
@@ -369,7 +380,7 @@ aedes.on('publish', (packet, client) => {
 
 aedes.on('subscribe', (subscriptions, client) => {
   const logPrefix = getClientLogPrefix(client);
-  console.log(`${logPrefix} [SUBSCRIBE] ${subscriptions.map(s => s.topic).join(', ')}`);
+  console.log(`${logPrefix} [SUBSCRIBE] Attempting to subscribe to: ${subscriptions.map(s => s.topic).join(', ')}`);
 });
 
 // Create HTTP server for WebSocket
@@ -394,12 +405,18 @@ wsServer.on('connection', (ws, req) => {
   
   // Enable WebSocket ping/pong to keep connection alive
   ws.on('ping', (data) => {
-    console.log('[WEBSOCKET] Received PING, sending PONG');
+    console.log(`[WEBSOCKET] Received WebSocket PING from ${clientIP}, sending PONG`);
     ws.pong(data);
   });
   
   ws.on('pong', () => {
-    console.log('[WEBSOCKET] Received PONG');
+    console.log(`[WEBSOCKET] Received WebSocket PONG from ${clientIP}`);
+  });
+  
+  // Handle WebSocket errors
+  ws.on('error', (error) => {
+    // Log other WebSocket errors
+    console.error(`[WEBSOCKET] Error from ${clientIP}:`, error.message);
   });
   
   // Create a duplex stream from the WebSocket
@@ -414,7 +431,9 @@ wsServer.on('connection', (ws, req) => {
           const clientInfo = (stream as any).client;
           if (clientInfo) {
             const logPrefix = getClientLogPrefix(clientInfo);
-            console.log(`${logPrefix} [MQTT] PONG sent`);
+            console.log(`${logPrefix} [MQTT] Sending PINGRESP (PONG) to client`);
+          } else {
+            console.log(`[MQTT] Sending PINGRESP (PONG) to unauthenticated client`);
           }
         }
         
@@ -444,9 +463,9 @@ wsServer.on('connection', (ws, req) => {
       const clientInfo = (stream as any).client;
       if (clientInfo) {
         const logPrefix = getClientLogPrefix(clientInfo);
-        console.log(`${logPrefix} [MQTT] PING received`);
+        console.log(`${logPrefix} [MQTT] Received PINGREQ (PING) from client`);
       } else {
-        console.log('[MQTT] PING from unknown client');
+        console.log('[MQTT] Received PINGREQ (PING) from unauthenticated client');
       }
     }
     stream.push(data);
