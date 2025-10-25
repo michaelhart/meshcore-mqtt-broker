@@ -351,11 +351,17 @@ aedes.on('client', (client) => {
   
   const logPrefix = getClientLogPrefix(client);
   console.log(`${logPrefix} [CLIENT] Connected`);
+  console.log(`${logPrefix} [CLIENT] Connection details - conn exists: ${!!(client as any).conn}, clientIP: ${(client as any).conn?.clientIP}`);
 });
 
 aedes.on('clientDisconnect', (client) => {
   const logPrefix = getClientLogPrefix(client);
   console.log(`${logPrefix} [CLIENT] Disconnected`);
+  
+  // Log additional info to debug why this client disconnected
+  if (client) {
+    console.log(`${logPrefix} [CLIENT] Disconnect details - clientType: ${(client as any).clientType}, publicKey: ${(client as any).publicKey?.substring(0, 8)}`);
+  }
 });
 
 aedes.on('publish', (packet, client) => {
@@ -369,7 +375,7 @@ aedes.on('publish', (packet, client) => {
 
 aedes.on('subscribe', (subscriptions, client) => {
   const logPrefix = getClientLogPrefix(client);
-  console.log(`${logPrefix} [SUBSCRIBE] ${subscriptions.map(s => s.topic).join(', ')}`);
+  console.log(`${logPrefix} [SUBSCRIBE] Attempting to subscribe to: ${subscriptions.map(s => s.topic).join(', ')}`);
 });
 
 // Create HTTP server for WebSocket
