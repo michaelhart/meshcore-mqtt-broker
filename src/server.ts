@@ -5,6 +5,8 @@ import { Duplex } from 'stream';
 import { config as dotenvConfig } from 'dotenv';
 import { verifyAuthToken } from '@michaelhart/meshcore-decoder';
 import { getAirportInfo } from 'airport-utils';
+import { RateLimiter } from './rate-limiter';
+import { getClientIP } from './ip-utils';
 
 // Load environment variables
 dotenvConfig();
@@ -58,6 +60,9 @@ enum ClientType {
 // Create Aedes MQTT broker
 const aedes = new Aedes();
 
+// Rate limiting for failed connections
+const rateLimiter = new RateLimiter(60000, 10, 300000);
+
 // Helper to get client identifier for logging
 function getClientLogPrefix(client: any): string {
   if (!client) return '[UNKNOWN]';
@@ -87,6 +92,13 @@ aedes.authenticate = async (client, username, password, callback) => {
         console.log(`${logPrefix} [AUTH] ✓ Subscriber authenticated (${usernameStr})`);
         (client as any).clientType = ClientType.SUBSCRIBER;
         (client as any).username = usernameStr;
+        
+        // Mark stream as authenticated
+        const stream = (client as any).stream;
+        if (stream && stream.clientIP) {
+          stream.authenticated = true;
+        }
+        
         callback(null, true);
       } else {
         console.log(`${logPrefix} [AUTH] ✗ Subscriber authentication failed - Invalid password`);
@@ -141,6 +153,13 @@ aedes.authenticate = async (client, username, password, callback) => {
     (client as any).publicKey = publicKey;
     (client as any).tokenPayload = tokenPayload;
     (client as any).clientType = ClientType.PUBLISHER;
+    
+    // Mark stream as authenticated
+    const stream = (client as any).stream;
+    if (stream && stream.clientIP) {
+      stream.authenticated = true;
+    }
+    
     callback(null, true);
   } catch (error) {
     console.error(`${logPrefix} [AUTH] Error during authentication:`, error);
@@ -325,6 +344,11 @@ aedes.authorizeSubscribe = (client, subscription, callback) => {
 
 // Event handlers
 aedes.on('client', (client) => {
+  // Link stream to client if available
+  if ((client as any).conn && (client as any).conn.clientIP) {
+    (client as any).stream = (client as any).conn;
+  }
+  
   const logPrefix = getClientLogPrefix(client);
   console.log(`${logPrefix} [CLIENT] Connected`);
 });
@@ -354,8 +378,19 @@ const httpServer = createServer();
 // Create WebSocket server
 const wsServer = new WebSocketServer({ server: httpServer });
 
-wsServer.on('connection', (ws) => {
-  console.log('[WEBSOCKET] New WebSocket connection');
+wsServer.on('connection', (ws, req) => {
+  try {
+    const clientIP = getClientIP(req);
+    
+    // Check if IP is blocked
+    if (rateLimiter.isBlocked(clientIP)) {
+      console.log(`[RATE_LIMIT] Rejecting connection from blocked IP: ${clientIP}`);
+      // Terminate immediately without trying to send a close frame
+      ws.terminate();
+      return;
+    }
+    
+    console.log(`[WEBSOCKET] New WebSocket connection from ${clientIP}`);
   
   // Enable WebSocket ping/pong to keep connection alive
   ws.on('ping', (data) => {
@@ -417,14 +452,31 @@ wsServer.on('connection', (ws) => {
     stream.push(data);
   });
 
+  // Store client IP on stream for logging
+  (stream as any).clientIP = clientIP;
+  (stream as any).authenticated = false;
+  
   // Handle WebSocket close
   ws.on('close', (code, reason) => {
     const clientInfo = (stream as any).client;
-    if (clientInfo) {
+    const wasAuthenticated = (stream as any).authenticated;
+    
+    // Check if client properly authenticated (has clientType set)
+    const hasValidAuth = clientInfo && (clientInfo as any).clientType;
+    
+    if (hasValidAuth) {
       const logPrefix = getClientLogPrefix(clientInfo);
-      console.log(`${logPrefix} [WEBSOCKET] Connection closed - Code: ${code}, Reason: ${reason.toString() || 'none'}`);
+      console.log(`${logPrefix} [WEBSOCKET] Connection closed from ${clientIP} - Code: ${code}, Reason: ${reason.toString() || 'none'}`);
     } else {
-      console.log(`[WEBSOCKET] Connection closed (unauthenticated) - Code: ${code}, Reason: ${reason.toString() || 'none'}`);
+      // Unauthenticated or invalid client - count as failed connection
+      console.log(`[C:${clientInfo?.id || 'null'}] [WEBSOCKET] Connection closed (unauthenticated) from ${clientIP} - Code: ${code}, Reason: ${reason.toString() || 'none'}`);
+      
+      if (!wasAuthenticated) {
+        const blocked = rateLimiter.recordFailure(clientIP);
+        if (blocked) {
+          console.log(`[RATE_LIMIT] IP ${clientIP} has been blocked`);
+        }
+      }
     }
     stream.push(null);
   });
@@ -443,6 +495,14 @@ wsServer.on('connection', (ws) => {
 
   // Pass the stream to Aedes
   aedes.handle(stream);
+  } catch (error) {
+    console.error('[WEBSOCKET] Error handling connection:', error);
+    try {
+      ws.terminate();
+    } catch (e) {
+      // Ignore errors when terminating
+    }
+  }
 });
 
 httpServer.listen(WS_PORT, HOST, () => {
