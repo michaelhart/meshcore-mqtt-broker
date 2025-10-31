@@ -25,9 +25,24 @@ function isValidIATACode(code: string): boolean {
   }
 }
 
+// Client types
+enum ClientType {
+  SUBSCRIBER = 'subscriber',
+  PUBLISHER = 'publisher'
+}
+
+// Subscriber roles
+enum SubscriberRole {
+  ADMIN = 1,           // Full access + can delete retained messages
+  FULL_ACCESS = 2,     // Full access, no hidden data
+  LIMITED = 3          // All access but with hidden/sensitive data filtered
+}
+
 // Load subscriber users from environment variables
-// Format: SUBSCRIBER_1=username:password, SUBSCRIBER_2=username:password, etc.
+// Format: SUBSCRIBER_1=username:password:role, SUBSCRIBER_2=username:password:role, etc.
+// Role: 1=admin (full+delete), 2=full_access (no hidden data), 3=limited (filtered data)
 const subscriberUsers = new Map<string, string>();
+const subscriberRoles = new Map<string, SubscriberRole>();
 
 let subscriberIndex = 1;
 while (true) {
@@ -36,10 +51,30 @@ while (true) {
     break;
   }
   
-  const [username, password] = subscriberEnvVar.split(':').map(s => s.trim());
+  const parts = subscriberEnvVar.split(':').map(s => s.trim());
+  const username = parts[0];
+  const password = parts[1];
+  const roleStr = parts[2];
+  
   if (username && password) {
     subscriberUsers.set(username, password);
-    console.log(`[CONFIG] Loaded subscriber user: ${username}`);
+    
+    // Parse and store role (default to LIMITED if not specified or invalid)
+    let role = SubscriberRole.LIMITED;
+    if (roleStr) {
+      const roleNum = parseInt(roleStr);
+      if (roleNum === 1 || roleNum === 2 || roleNum === 3) {
+        role = roleNum as SubscriberRole;
+      }
+    }
+    subscriberRoles.set(username, role);
+    
+    const roleNames = {
+      [SubscriberRole.ADMIN]: 'admin',
+      [SubscriberRole.FULL_ACCESS]: 'full_access', 
+      [SubscriberRole.LIMITED]: 'limited'
+    };
+    console.log(`[CONFIG] Loaded subscriber user: ${username} (role: ${roleNames[role]})`);
   } else {
     console.warn(`[CONFIG] Invalid format for SUBSCRIBER_${subscriberIndex}: ${subscriberEnvVar}`);
   }
@@ -49,12 +84,6 @@ while (true) {
 
 if (subscriberUsers.size === 0) {
   console.log('[CONFIG] No subscriber users configured');
-}
-
-// Client types
-enum ClientType {
-  SUBSCRIBER = 'subscriber',
-  PUBLISHER = 'publisher'
 }
 
 // Create Aedes MQTT broker
@@ -89,9 +118,11 @@ aedes.authenticate = async (client, username, password, callback) => {
     if (subscriberUsers.has(usernameStr)) {
       const expectedPassword = subscriberUsers.get(usernameStr);
       if (passwordStr === expectedPassword) {
-        console.log(`${logPrefix} [AUTH] ✓ Subscriber authenticated (${usernameStr})`);
+        const role = subscriberRoles.get(usernameStr) || SubscriberRole.LIMITED;
+        console.log(`${logPrefix} [AUTH] ✓ Subscriber authenticated (${usernameStr}, role: ${role})`);
         (client as any).clientType = ClientType.SUBSCRIBER;
         (client as any).username = usernameStr;
+        (client as any).role = role;
         
         // Mark stream as authenticated
         const stream = (client as any).stream;
@@ -184,6 +215,15 @@ aedes.authorizePublish = (client, packet, callback) => {
   
   // Subscriber clients cannot publish (subscribe-only)
   if (clientType === ClientType.SUBSCRIBER) {
+    const role = (client as any).role || SubscriberRole.LIMITED;
+    
+    // Admin subscribers (role 1) can publish empty retained messages to delete them
+    if (role === SubscriberRole.ADMIN && packet.retain && packet.payload.length === 0) {
+      console.log(`${logPrefix} [AUTHZ] ✓ Admin delete authorized -> ${packet.topic}`);
+      callback(null);
+      return;
+    }
+    
     console.log(`${logPrefix} [AUTHZ] ✗ Publish denied (subscriber) -> ${packet.topic}`);
     callback(new Error('Subscriber clients are subscribe-only'));
     return;
@@ -345,6 +385,83 @@ aedes.authorizeSubscribe = (client, subscription, callback) => {
   // Unknown client type
   console.log(`${logPrefix} [AUTHZ] ✗ Subscribe denied -> ${subscription.topic} (unknown client type)`);
   callback(new Error('Unknown client type'));
+};
+
+// Authorization handler for forwarding messages to subscribers (filter sensitive data)
+aedes.authorizeForward = (client, packet) => {
+  if (!client) {
+    return packet;
+  }
+  
+  const clientType = (client as any).clientType;
+  const role = (client as any).role;
+  
+  // Block $SYS/* messages for non-admin subscribers (only role 1 can see system topics)
+  if (clientType === ClientType.SUBSCRIBER && role !== SubscriberRole.ADMIN) {
+    if (packet.topic.startsWith('$SYS/')) {
+      return null; // Block delivery of this message
+    }
+  }
+  
+  // Only filter for LIMITED role subscribers (role 3)
+  if (clientType === ClientType.SUBSCRIBER && role === SubscriberRole.LIMITED) {
+    // Filter status messages (meshcore/*/status) to remove stats object
+    if (packet.topic.endsWith('/status') && packet.payload && packet.payload.length > 0) {
+      try {
+        const message = JSON.parse(packet.payload.toString());
+        
+        // Remove the stats object if it exists
+        if (message.stats) {
+          delete message.stats;
+          
+          // Create a new packet with filtered payload
+          return {
+            ...packet,
+            payload: Buffer.from(JSON.stringify(message))
+          };
+        }
+      } catch (error) {
+        // If JSON parsing fails, just return the original packet
+        console.debug(`[FILTER] Failed to parse status message for filtering:`, error);
+      }
+    }
+    
+    // Filter packet messages (meshcore/*/packets) to remove SNR, RSSI, score
+    if (packet.topic.endsWith('/packets') && packet.payload && packet.payload.length > 0) {
+      try {
+        const message = JSON.parse(packet.payload.toString());
+        
+        // Remove radio metrics if they exist
+        let filtered = false;
+        if (message.SNR !== undefined) {
+          delete message.SNR;
+          filtered = true;
+        }
+        if (message.RSSI !== undefined) {
+          delete message.RSSI;
+          filtered = true;
+        }
+        if (message.score !== undefined) {
+          delete message.score;
+          filtered = true;
+        }
+        
+        // Only create new packet if we actually filtered something
+        if (filtered) {
+          return {
+            ...packet,
+            payload: Buffer.from(JSON.stringify(message))
+          };
+        }
+      } catch (error) {
+        // If JSON parsing fails, just return the original packet
+        console.debug(`[FILTER] Failed to parse packet message for filtering:`, error);
+      }
+    }
+  }
+  
+  // No filtering needed - return original packet
+  return packet;
 };
 
 // Event handlers
