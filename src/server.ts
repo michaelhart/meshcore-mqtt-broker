@@ -238,13 +238,15 @@ aedes.authorizePublish = (client, packet, callback) => {
     }
 
     // Validate topic format
-    // Supported formats:
-    //   meshcore/{IATA}/subtopic (e.g., meshcore/SEA/packets)
-    //   meshcore/{IATA}/{PUBLIC_KEY}/subtopic (e.g., meshcore/SEA/ABCD1234.../packets)
+    // Required format: meshcore/{IATA}/{PUBLIC_KEY}/subtopic
+    // Examples:
+    //   meshcore/SEA/ABCD1234.../packets
+    //   meshcore/SEA/ABCD1234.../status
+    //   meshcore/SEA/ABCD1234.../internal (ADMIN only)
     const topicParts = packet.topic.split('/').map(part => part.trim());
-    if (topicParts.length < 3) {
-      console.log(`${logPrefix} [AUTHZ] ✗ Publish denied -> ${packet.topic} (must be meshcore/AIRPORT/subtopic format)`);
-      callback(new Error('Topic must be meshcore/AIRPORT/subtopic or meshcore/AIRPORT/PUBKEY/subtopic format'));
+    if (topicParts.length < 4) {
+      console.log(`${logPrefix} [AUTHZ] ✗ Publish denied -> ${packet.topic} (must be meshcore/IATA/PUBKEY/subtopic format)`);
+      callback(new Error('Topic must be meshcore/IATA/PUBKEY/subtopic format (4 parts required)'));
       return;
     }
     
@@ -290,39 +292,35 @@ aedes.authorizePublish = (client, packet, callback) => {
       }
     }
     
-    // Check if topic includes public key (4 parts = meshcore/IATA/PUBKEY/subtopic)
-    if (topicParts.length >= 4) {
-      const topicPublicKey = topicParts[2].trim().toUpperCase();
-      
-      // Validate it looks like a public key (64 hex chars)
-      if (!/^[0-9A-F]{64}$/i.test(topicPublicKey)) {
-        console.log(`${logPrefix} [AUTHZ] ✗ Publish denied -> ${packet.topic} (invalid pubkey format)`);
-        console.log(`${logPrefix} [DISCONNECT] Closing client - Invalid public key format in topic`);
-        console.log(`${logPrefix} [DISCONNECT] Topic pubkey: "${topicPublicKey}" (length: ${topicPublicKey.length})`);
-        console.log(`${logPrefix} [DISCONNECT] Topic pubkey hex: ${Buffer.from(topicPublicKey).toString('hex')}`);
-        console.log(`${logPrefix} [DISCONNECT] Full topic: "${packet.topic}"`);
-        callback(new Error('Public key in topic must be 64 hex characters'));
-        client.close();
-        return;
-      }
-      
-      // Validate topic public key matches authenticated client
-      const clientPublicKey = (client as any).publicKey.toUpperCase();
-      if (topicPublicKey !== clientPublicKey) {
-        console.log(`${logPrefix} [AUTHZ] ✗ Publish denied -> ${packet.topic} (pubkey mismatch)`);
-        console.log(`${logPrefix} [DISCONNECT] Closing client - Public key mismatch`);
-        console.log(`${logPrefix} [DISCONNECT] Topic pubkey:  "${topicPublicKey}"`);
-        console.log(`${logPrefix} [DISCONNECT] Client pubkey: "${clientPublicKey}"`);
-        console.log(`${logPrefix} [DISCONNECT] Full topic: "${packet.topic}"`);
-        callback(new Error('Public key in topic must match authenticated public key'));
-        client.close();
-        return;
-      }
+    // Validate public key in topic (required - topicParts[2])
+    const topicPublicKey = topicParts[2].trim().toUpperCase();
+    
+    // Validate it looks like a public key (64 hex chars)
+    if (!/^[0-9A-F]{64}$/i.test(topicPublicKey)) {
+      console.log(`${logPrefix} [AUTHZ] ✗ Publish denied -> ${packet.topic} (invalid pubkey format)`);
+      console.log(`${logPrefix} [DISCONNECT] Closing client - Invalid public key format in topic`);
+      console.log(`${logPrefix} [DISCONNECT] Topic pubkey: "${topicPublicKey}" (length: ${topicPublicKey.length})`);
+      console.log(`${logPrefix} [DISCONNECT] Topic pubkey hex: ${Buffer.from(topicPublicKey).toString('hex')}`);
+      console.log(`${logPrefix} [DISCONNECT] Full topic: "${packet.topic}"`);
+      callback(new Error('Public key in topic must be 64 hex characters'));
+      client.close();
+      return;
+    }
+    
+    // Validate topic public key matches authenticated client
+    const clientPublicKey = (client as any).publicKey.toUpperCase();
+    if (topicPublicKey !== clientPublicKey) {
+      console.log(`${logPrefix} [AUTHZ] ✗ Publish denied -> ${packet.topic} (pubkey mismatch)`);
+      console.log(`${logPrefix} [DISCONNECT] Closing client - Public key mismatch`);
+      console.log(`${logPrefix} [DISCONNECT] Topic pubkey:  "${topicPublicKey}"`);
+      console.log(`${logPrefix} [DISCONNECT] Client pubkey: "${clientPublicKey}"`);
+      console.log(`${logPrefix} [DISCONNECT] Full topic: "${packet.topic}"`);
+      callback(new Error('Public key in topic must match authenticated public key'));
+      client.close();
+      return;
     }
 
     // Validate that the message contains origin_id matching the authenticated public key
-    const clientPublicKey = (client as any).publicKey;
-    
     try {
       const payload = packet.payload.toString('utf-8');
       const message = JSON.parse(payload);
@@ -344,6 +342,37 @@ aedes.authorizePublish = (client, packet, callback) => {
       }
       
       console.log(`${logPrefix} [AUTHZ] ✓ Publish authorized -> ${packet.topic}`);
+      
+      // Publish JWT payload to /internal topic (ADMIN-only, contains PII)
+      const tokenPayload = (client as any).tokenPayload;
+      if (tokenPayload) {
+        // Extract location from topic (meshcore/IATA/... or meshcore/IATA/PUBKEY/...)
+        const location = topicParts[1];
+        const internalTopic = `meshcore/${location}/${clientPublicKey}/internal`;
+        
+        const internalMessage = {
+          origin_id: clientPublicKey,
+          timestamp: Date.now(),
+          jwt_payload: tokenPayload
+        };
+        
+        // Publish to internal topic (retained so admins can see it later)
+        aedes.publish({
+          cmd: 'publish',
+          topic: internalTopic,
+          payload: Buffer.from(JSON.stringify(internalMessage)),
+          qos: 0,
+          dup: false,
+          retain: true
+        }, (err) => {
+          if (err) {
+            console.error(`${logPrefix} [INTERNAL] Failed to publish JWT payload:`, err);
+          } else {
+            console.log(`${logPrefix} [INTERNAL] Published JWT payload -> ${internalTopic}`);
+          }
+        });
+      }
+      
       callback(null);
     } catch (error) {
       console.log(`${logPrefix} [AUTHZ] ✗ Publish denied -> ${packet.topic} (invalid JSON or validation error)`);
@@ -403,18 +432,43 @@ aedes.authorizeForward = (client, packet) => {
     }
   }
   
+  // Critical: Block /internal topics for non-admin subscribers (contains PII)
+  if (clientType === ClientType.SUBSCRIBER && role !== SubscriberRole.ADMIN) {
+    if (packet.topic.includes('/internal')) {
+      return null; // Block delivery of this message
+    }
+  }
+  
   // Only filter for LIMITED role subscribers (role 3)
   if (clientType === ClientType.SUBSCRIBER && role === SubscriberRole.LIMITED) {
-    // Filter status messages (meshcore/*/status) to remove stats object
+    // Filter status messages (meshcore/*/status) to remove stats, model, and firmware_version
     if (packet.topic.endsWith('/status') && packet.payload && packet.payload.length > 0) {
       try {
         const message = JSON.parse(packet.payload.toString());
         
+        // Track if we need to filter anything
+        let filtered = false;
+        
         // Remove the stats object if it exists
         if (message.stats) {
           delete message.stats;
-          
-          // Create a new packet with filtered payload
+          filtered = true;
+        }
+        
+        // Remove model if it exists
+        if (message.model !== undefined) {
+          delete message.model;
+          filtered = true;
+        }
+        
+        // Remove firmware_version if it exists
+        if (message.firmware_version !== undefined) {
+          delete message.firmware_version;
+          filtered = true;
+        }
+        
+        // Only create new packet if we actually filtered something
+        if (filtered) {
           return {
             ...packet,
             payload: Buffer.from(JSON.stringify(message))

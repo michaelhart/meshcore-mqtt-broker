@@ -63,14 +63,20 @@ MQTT_HOST=0.0.0.0
 AUTH_EXPECTED_AUDIENCE=mqtt.yourdomain.com
 
 # Subscribe-Only Users (read-only monitoring accounts)
-# Format: SUBSCRIBER_N=username:password
+# Format: SUBSCRIBER_N=username:password:role
+# Role: 1=admin (full access + delete + PII), 2=full_access (no filtering), 3=limited (filtered)
 # Add as many as you need by incrementing the number
-SUBSCRIBER_1=admin:your-secure-password-here
-SUBSCRIBER_2=viewer:another-secure-password
-SUBSCRIBER_3=monitor:yet-another-password
+SUBSCRIBER_1=admin:your-secure-password-here:1
+SUBSCRIBER_2=viewer:another-secure-password:2
+SUBSCRIBER_3=monitor:yet-another-password:3
 ```
 
-**Subscribe-only users** can read all messages but cannot publish. They're useful for monitoring, debugging, and administrative dashboards.
+**Subscribe-only users** can read messages but cannot publish. They're useful for monitoring, debugging, and administrative dashboards.
+
+**Subscriber Roles**:
+- **Role 1 (Admin)**: Full access including `/internal` topics (contains PII), `$SYS/*` system topics, and ability to delete retained messages
+- **Role 2 (Full Access)**: Access to all public topics with no data filtering, cannot access `/internal` or `$SYS/*`
+- **Role 3 (Limited)**: Access to public topics only with sensitive data filtered (SNR, RSSI, score, stats, model, firmware_version removed from messages)
 
 ## Installation
 
@@ -137,12 +143,21 @@ connect();
 
 ## Topics
 
-Publishers can only publish to topics under `meshcore/*` with the format:
+Publishers can only publish to topics with the following format:
 
-- `meshcore/{IATA_CODE}/{subtopic}` - e.g., `meshcore/SEA/packets`
-- `meshcore/{IATA_CODE}/{PUBLIC_KEY}/{subtopic}` - e.g., `meshcore/SEA/7E76...9400/packets`
+- `meshcore/{IATA_CODE}/{PUBLIC_KEY}/{subtopic}`
 
-Where `{IATA_CODE}` must be a valid 3-letter IATA airport code (e.g., SEA, PDX, BOS) or `test` for testing and `{PUBLIC_KEY}` must be the full 64-character public key.
+Examples:
+- `meshcore/SEA/7E7662676F7F0850A8A355BAAFBFC1EB7B4174C340442D7D7161C9474A2C9400/packets`
+- `meshcore/SEA/7E7662676F7F0850A8A355BAAFBFC1EB7B4174C340442D7D7161C9474A2C9400/status`
+- `meshcore/PDX/7E7662676F7F0850A8A355BAAFBFC1EB7B4174C340442D7D7161C9474A2C9400/internal` (ADMIN-only - contains PII)
+
+Where:
+- `{IATA_CODE}` must be a valid 3-letter IATA airport code (e.g., SEA, PDX, BOS) or `test` for testing
+- `{PUBLIC_KEY}` must be the full 64-character hex public key (matching your authenticated public key)
+- `{subtopic}` can be any subtopic name (e.g., `packets`, `status`, `internal`)
+
+**Important**: The `/internal` subtopic is ADMIN-only and contains PII (Personally Identifiable Information) from JWT payloads. Only subscribers with role 1 (admin) can access these topics.
 
 All published messages must be valid JSON and contain an `origin_id` field matching your authenticated public key. In the future, this requirement and the origin_id field may be removed, as they are a part of the MQTT session. For now, this is largely for backwards compatibility.
 
