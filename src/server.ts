@@ -416,6 +416,9 @@ aedes.authorizeSubscribe = (client, subscription, callback) => {
   callback(new Error('Unknown client type'));
 };
 
+// Track last seen status timestamp per origin_id to prevent race conditions
+const lastStatusTimestamps = new Map<string, number>();
+
 // Authorization handler for forwarding messages to subscribers (filter sensitive data)
 aedes.authorizeForward = (client, packet) => {
   if (!client) {
@@ -436,6 +439,31 @@ aedes.authorizeForward = (client, packet) => {
   if (clientType === ClientType.SUBSCRIBER && role !== SubscriberRole.ADMIN) {
     if (packet.topic.includes('/internal')) {
       return null; // Block delivery of this message
+    }
+  }
+  
+  // Prevent stale status messages from overwriting newer ones (LWT race condition)
+  if (packet.topic.endsWith('/status') && packet.payload && packet.payload.length > 0) {
+    try {
+      const message = JSON.parse(packet.payload.toString());
+      const originId = message.origin_id;
+      const timestamp = message.timestamp ? new Date(message.timestamp).getTime() : 0;
+      
+      if (originId && timestamp) {
+        const lastTimestamp = lastStatusTimestamps.get(originId) || 0;
+        
+        if (timestamp < lastTimestamp) {
+          // This is a stale status message (probably a delayed LWT)
+          console.log(`[FILTER] Blocking stale status message for ${originId.substring(0, 8)} (${new Date(timestamp).toISOString()} < ${new Date(lastTimestamp).toISOString()})`);
+          return null; // Block this stale message
+        }
+        
+        // Update the last seen timestamp
+        lastStatusTimestamps.set(originId, timestamp);
+      }
+    } catch (error) {
+      // If parsing fails, let it through (don't block non-JSON status messages)
+      console.debug(`[FILTER] Failed to parse status message for timestamp check:`, error);
     }
   }
   
