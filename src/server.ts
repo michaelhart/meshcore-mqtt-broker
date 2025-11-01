@@ -530,7 +530,15 @@ aedes.on('clientError', (client, err) => {
 });
 
 // Create HTTP server for WebSocket
-const httpServer = createServer();
+const httpServer = createServer((req, res) => {
+  // If this is not a WebSocket upgrade request, redirect to analyzer
+  if (!req.headers.upgrade || req.headers.upgrade.toLowerCase() !== 'websocket') {
+    console.log(`[HTTP] Non-WebSocket request from ${getClientIP(req)}, redirecting to analyzer`);
+    res.writeHead(301, { 'Location': 'https://analyzer.letsmesh.net/' });
+    res.end();
+    return;
+  }
+});
 
 // Create WebSocket server
 const wsServer = new WebSocketServer({ server: httpServer });
