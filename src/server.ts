@@ -474,11 +474,34 @@ aedes.on('client', (client) => {
   const logPrefix = getClientLogPrefix(client);
   console.log(`${logPrefix} [CLIENT] Connected`);
   console.log(`${logPrefix} [CLIENT] Connection details - conn exists: ${!!(client as any).conn}, clientIP: ${(client as any).conn?.clientIP}`);
+  
+  // Track when this client connected for disconnect timing
+  (client as any).connectedAt = Date.now();
+  
+  // Hook into the client's stream close event to see WHO closed it
+  const stream = (client as any).stream;
+  if (stream) {
+    const originalClose = stream.close?.bind(stream);
+    const originalDestroy = stream.destroy?.bind(stream);
+    
+    (stream as any).close = function(...args: any[]) {
+      console.log(`${logPrefix} [STREAM] close() called (server-initiated close)`);
+      if (originalClose) originalClose(...args);
+    };
+    
+    (stream as any).destroy = function(...args: any[]) {
+      console.log(`${logPrefix} [STREAM] destroy() called - error: ${args[0]?.message || 'none'}`);
+      if (originalDestroy) originalDestroy(...args);
+    };
+  }
 });
 
 aedes.on('clientDisconnect', (client) => {
   const logPrefix = getClientLogPrefix(client);
-  console.log(`${logPrefix} [CLIENT] Disconnected`);
+  const connectedAt = (client as any).connectedAt;
+  const duration = connectedAt ? Math.round((Date.now() - connectedAt) / 1000) : 'unknown';
+  
+  console.log(`${logPrefix} [CLIENT] Disconnected (connected for ${duration}s)`);
   
   // Log additional info to debug why this client disconnected
   if (client) {
@@ -498,6 +521,12 @@ aedes.on('publish', (packet, client) => {
 aedes.on('subscribe', (subscriptions, client) => {
   const logPrefix = getClientLogPrefix(client);
   console.log(`${logPrefix} [SUBSCRIBE] Attempting to subscribe to: ${subscriptions.map(s => s.topic).join(', ')}`);
+});
+
+// Log when client sends DISCONNECT packet (graceful disconnect)
+aedes.on('clientError', (client, err) => {
+  const logPrefix = getClientLogPrefix(client);
+  console.log(`${logPrefix} [ERROR] Client error: ${err.message}`);
 });
 
 // Create HTTP server for WebSocket
