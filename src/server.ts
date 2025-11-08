@@ -2,18 +2,20 @@ import Aedes from 'aedes';
 import { createServer } from 'http';
 import { WebSocketServer } from 'ws';
 import { Duplex } from 'stream';
-import { config as dotenvConfig } from 'dotenv';
 import { verifyAuthToken } from '@michaelhart/meshcore-decoder';
 import { getAirportInfo } from 'airport-utils';
 import { RateLimiter } from './rate-limiter';
 import { getClientIP } from './ip-utils';
+import { AbuseDetector } from './abuse-detector';
+import { loadMqttConfig, loadAbuseConfig } from './config';
 
-// Load environment variables
-dotenvConfig();
+// Load and validate configuration
+const mqttConfig = loadMqttConfig();
+const abuseConfig = loadAbuseConfig();
 
-const WS_PORT = parseInt(process.env.MQTT_WS_PORT || '8883');
-const HOST = process.env.MQTT_HOST || '0.0.0.0';
-const EXPECTED_AUDIENCE = process.env.AUTH_EXPECTED_AUDIENCE || '';
+const WS_PORT = mqttConfig.wsPort;
+const HOST = mqttConfig.host;
+const EXPECTED_AUDIENCE = mqttConfig.expectedAudience;
 
 // Helper function to validate IATA airport codes
 function isValidIATACode(code: string): boolean {
@@ -92,6 +94,9 @@ const aedes = new Aedes();
 // Rate limiting for failed connections
 const rateLimiter = new RateLimiter(60000, 10, 300000);
 
+// Abuse detection
+const abuseDetector = new AbuseDetector(abuseConfig);
+
 // Helper to get client identifier for logging
 function getClientLogPrefix(client: any): string {
   if (!client) return '[UNKNOWN]';
@@ -125,7 +130,7 @@ aedes.authenticate = async (client, username, password, callback) => {
         (client as any).role = role;
         
         // Mark stream as authenticated
-        const stream = (client as any).stream;
+        const stream = (client as any).conn;
         if (stream && stream.clientIP) {
           stream.authenticated = true;
         }
@@ -191,10 +196,14 @@ aedes.authenticate = async (client, username, password, callback) => {
     (client as any).clientType = ClientType.PUBLISHER;
     
     // Mark stream as authenticated
-    const stream = (client as any).stream;
+    const stream = (client as any).conn;
     if (stream && stream.clientIP) {
       stream.authenticated = true;
     }
+    
+    // Initialize abuse detection tracking
+    const clientIP = stream?.clientIP;
+    abuseDetector.initializeClient(publicKey, `v1_${publicKey}`, clientIP);
     
     callback(null, true);
   } catch (error) {
@@ -320,6 +329,18 @@ aedes.authorizePublish = (client, packet, callback) => {
       return;
     }
 
+    // Normalize the topic to UPPERCASE for the public key component
+    // This prevents duplicate topics with different casing (e.g., 7553b337... vs 7553B337...)
+    // Reconstruct topic with uppercase location code and public key
+    const normalizedLocation = locationCode.toUpperCase();
+    const normalizedTopic = `meshcore/${normalizedLocation}/${clientPublicKey}/${topicParts.slice(3).join('/')}`;
+    
+    // Update the packet topic to the normalized version
+    if (packet.topic !== normalizedTopic) {
+      console.log(`${logPrefix} [AUTHZ] Normalized topic: ${packet.topic} -> ${normalizedTopic}`);
+      packet.topic = normalizedTopic;
+    }
+
     // Validate that the message contains origin_id matching the authenticated public key
     try {
       const payload = packet.payload.toString('utf-8');
@@ -341,6 +362,19 @@ aedes.authorizePublish = (client, packet, callback) => {
         return;
       }
       
+      // Track with abuse detector (no enforcement, just tracking)
+      const iata = topicParts[1];
+      
+      // Check IATA changes
+      const publicKey = (client as any).publicKey;
+      const trustState = abuseDetector.getClientStats(publicKey);
+      if (trustState) {
+        abuseDetector.checkIataChange(trustState, iata);
+        
+        // Record packet
+        abuseDetector.recordPacket(client, packet);
+      }
+      
       console.log(`${logPrefix} [AUTHZ] ✓ Publish authorized -> ${packet.topic}`);
       
       // Publish JWT payload to /internal topic (ADMIN-only, contains PII)
@@ -350,10 +384,56 @@ aedes.authorizePublish = (client, packet, callback) => {
         const location = topicParts[1];
         const internalTopic = `meshcore/${location}/${clientPublicKey}/internal`;
         
+        // Get trust state for internal message
+        const trustState = abuseDetector.getClientStats(clientPublicKey);
+        let trustMetrics: any = null;
+        
+        if (trustState) {
+          const clockQuality = trustState.clockTracking.erraticJumps.length === 0 ? 'stable' :
+                             trustState.clockTracking.erraticJumps.length < 3 ? 'syncing' : 'erratic';
+          
+          trustMetrics = {
+            status: trustState.status,
+            enforcement_enabled: abuseConfig.enforcementEnabled,
+            totalPacketsReceived: trustState.totalPacketsReceived,
+            totalPacketsSilenced: trustState.totalPacketsSilenced,
+            duplicateCount: trustState.duplicateCount,
+            anomalyCount: trustState.anomalyCount,
+            anomalies: trustState.anomalies.slice(0, 20).map(a => ({
+              type: a.type,
+              details: a.details,
+              timestamp: a.timestamp,
+            })),
+            peakRateObserved: Math.round(trustState.peakRateObserved * 100) / 100,
+            tokenBucket: {
+              tokens: Math.round(trustState.tokenBucket.tokens * 10) / 10,
+              capacity: trustState.tokenBucket.capacity,
+            },
+            iataTracking: {
+              currentIata: trustState.currentIata,
+              iataChangeCount24h: trustState.iataChangeCount24h,
+              iataHistory: trustState.iataHistory.map(h => h.iata),
+            },
+            clockTracking: {
+              estimatedOffset: trustState.clockTracking.estimatedOffset ? 
+                Math.round(trustState.clockTracking.estimatedOffset / 1000) : undefined,
+              erraticJumpCount: trustState.clockTracking.erraticJumps.length,
+              lastDeviceTimestamp: trustState.clockTracking.lastDeviceTimestamp,
+              clockQuality,
+            },
+            recentIPs: trustState.recentIPs.slice(0, 10).map(ip => ({
+              ip: ip.ip,
+              connectionCount: ip.connectionCount,
+              lastSeen: ip.lastSeen,
+            })),
+          };
+        }
+        
         const internalMessage = {
           origin_id: clientPublicKey,
           timestamp: Date.now(),
-          jwt_payload: tokenPayload
+          jwt_payload: tokenPayload,
+          trust_state: trustMetrics,
         };
         
         // Publish to internal topic (retained so admins can see it later)
@@ -549,9 +629,7 @@ aedes.authorizeForward = (client, packet) => {
 // Event handlers
 aedes.on('client', (client) => {
   // Link stream to client if available
-  if ((client as any).conn && (client as any).conn.clientIP) {
-    (client as any).stream = (client as any).conn;
-  }
+  (client as any).stream = (client as any).conn;
   
   const logPrefix = getClientLogPrefix(client);
   console.log(`${logPrefix} [CLIENT] Connected`);
@@ -785,6 +863,7 @@ httpServer.listen(WS_PORT, HOST, () => {
 // Graceful shutdown
 process.on('SIGINT', () => {
   console.log('\n[SHUTDOWN] Closing MQTT broker...');
+  abuseDetector.shutdown();
   aedes.close(() => {
     console.log('[SHUTDOWN] Broker closed');
     process.exit(0);
@@ -793,6 +872,7 @@ process.on('SIGINT', () => {
 
 process.on('SIGTERM', () => {
   console.log('\n[SHUTDOWN] Closing MQTT broker...');
+  abuseDetector.shutdown();
   aedes.close(() => {
     console.log('[SHUTDOWN] Broker closed');
     process.exit(0);

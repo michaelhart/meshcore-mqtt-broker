@@ -20,6 +20,7 @@
     "@michaelhart/meshcore-decoder": "^0.2.1",
     "aedes": "^0.51.3",
     "airport-utils": "^1.0.23",
+    "better-sqlite3": "^12.4.1",
     "dotenv": "^17.2.3",
     "ini": "^5.0.0",
     "tsx": "^4.19.2",
@@ -27,6 +28,7 @@
     "ws": "^8.18.3"
   },
   "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
     "@types/ini": "^4.1.1",
     "@types/node": "^24.7.0",
     "@types/ws": "^8.18.1",
