@@ -222,6 +222,13 @@ aedes.authorizePublish = (client, packet, callback) => {
   const logPrefix = getClientLogPrefix(client);
   const clientType = (client as any).clientType;
   
+  // Important: Strip retain flag from /status messages to prevent stale data on ingestor restart
+  // LWT (offline) messages are also STATUS messages and should NOT be retained
+  if (packet.topic.endsWith('/status') && packet.retain) {
+    console.log(`${logPrefix} [AUTHZ] Stripping retain flag from STATUS message -> ${packet.topic}`);
+    packet.retain = false;
+  }
+  
   // Subscriber clients cannot publish (subscribe-only)
   if (clientType === ClientType.SUBSCRIBER) {
     const role = (client as any).role || SubscriberRole.LIMITED;
