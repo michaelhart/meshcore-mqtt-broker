@@ -97,6 +97,37 @@ npm run build
 npm start
 ```
 
+### Docker Compose
+
+For easy deployment with Docker:
+
+1. **Setup environment**:
+   ```bash
+   cp .env.example .env
+   # Edit .env with your configuration
+   ```
+
+2. **Start the broker**:
+   ```bash
+   docker-compose up
+   ```
+
+3. **Run in background**:
+   ```bash
+   docker-compose up -d
+   ```
+
+4. **Stop the broker**:
+   ```bash
+   docker-compose down
+   ```
+
+The Docker setup includes:
+- **Port 8883**: WebSocket MQTT port exposed
+- **Persistent data**: Abuse detection database stored in `./data/`
+- **Configuration**: Reads from your `.env` file
+- **Auto-restart**: Container automatically restarts on failure
+
 ## Connecting Clients
 
 ### JavaScript/Node.js Example
@@ -166,14 +197,18 @@ Subscribers (read-only users) can subscribe to any topic including wildcards lik
 
 ## Deployment
 
-This project is designed to be deployed via Nixpacks (e.g., to Dokploy) similar to the ingestor project.
+This project can be deployed in several ways:
 
+### Docker Compose (Recommended for development/testing)
+See the [Docker Compose](#docker-compose) section above for quick local deployment.
+
+### Nixpacks (for Dokploy and similar platforms)
 The build process will:
 1. Install dependencies
 2. Compile TypeScript to JavaScript
 3. Run the compiled server
 
-For setting up with TLS using Cloudflare Tunnels, see [docs/cloudflare-tunnels.md](docs/cloudflare-tunnels.md). This is the recommended way to deploy the MQTT broker.
+For setting up with TLS using Cloudflare Tunnels, see [docs/cloudflare-tunnels.md](docs/cloudflare-tunnels.md). This is the recommended way to deploy the MQTT broker in production.
 
 
 ## License
