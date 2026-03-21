@@ -59,8 +59,9 @@ MQTT_WS_PORT=8883
 MQTT_HOST=0.0.0.0
 
 # Authentication Settings
-# Expected audience claim in JWT tokens (leave empty to skip validation)
-AUTH_EXPECTED_AUDIENCE=mqtt.yourdomain.com
+# Expected audience claim in JWT tokens
+# Set it to a hostname like mqtt.yourdomain.com, or leave it blank to skip validation
+AUTH_EXPECTED_AUDIENCE=
 
 # Subscribe-Only Users (read-only monitoring accounts)
 # Format: SUBSCRIBER_N=username:password:role
