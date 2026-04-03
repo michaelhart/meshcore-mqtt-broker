@@ -1,0 +1,11 @@
+services:
+  meshcore-mqtt-broker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: meshcore-mqtt-broker
+    ports:
+      - "8883:8883"
+    volumes:
+      - ./data:/data
+      - ./.env:/app/.env:ro
