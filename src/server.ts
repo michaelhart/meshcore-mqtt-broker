@@ -7,12 +7,14 @@ import { getAirportInfo } from 'airport-utils';
 import { RateLimiter } from './rate-limiter';
 import { getClientIP } from './ip-utils';
 import { AbuseDetector } from './abuse-detector';
-import { loadMqttConfig, loadAbuseConfig, loadSubscriberConfig } from './config';
+import { loadMqttConfig, loadAbuseConfig, loadSubscriberConfig, loadRegionConfig } from './config';
+import { IataLimiter } from './region-limiter';
 
 // Load and validate configuration
 const mqttConfig = loadMqttConfig();
 const abuseConfig = loadAbuseConfig();
 const subscriberConfig = loadSubscriberConfig();
+const regionConfig = loadRegionConfig();
 
 const WS_PORT = mqttConfig.wsPort;
 const HOST = mqttConfig.host;
@@ -115,6 +117,9 @@ const aedes = new Aedes();
 
 // Rate limiting for failed connections
 const rateLimiter = new RateLimiter(60000, 10, 300000);
+
+// Region connection limiting
+const regionLimiter = new IataLimiter(regionConfig);
 
 // Abuse detection
 const abuseDetector = new AbuseDetector(abuseConfig);
@@ -456,9 +461,25 @@ aedes.authorizePublish = (client, packet, callback) => {
       // Track with abuse detector (no enforcement, just tracking)
       // Use normalizedLocation to ensure consistent tracking regardless of case
       
-      // Check IATA changes
-      const publicKey = (client as any).publicKey;
-      const trustState = abuseDetector.getClientStats(publicKey);
+// One client = one IATA: track which IATA this client is registered to
+    // This enforces the per-IATA connection limit
+    const publicKey = (client as any).publicKey;
+
+    if (regionConfig.enabled) {
+      // The client's registered IATA (set on first publish) — use normalizedLocation
+      if (!abuseDetector.getClientStats(publicKey)) {
+        // First time this client publishes — check IATA limit
+        if (!regionLimiter.checkIataAccess(normalizedLocation, publicKey)) {
+          console.log(`${logPrefix} [IATA] ✗ Client rejected — ${normalizedLocation} already at max clients`);
+          callback(new Error(`IATA ${normalizedLocation} is at full capacity. Try another IATA code or contact your broker administrator.`));
+          client.close();
+          return;
+        }
+      }
+    }
+
+    // Check IATA changes
+    const trustState = abuseDetector.getClientStats(publicKey);
       if (trustState) {
         abuseDetector.checkIataChange(trustState, normalizedLocation);
         
@@ -839,6 +860,14 @@ wsServer.on('connection', (ws, req) => {
       return;
     }
     
+    // Check region connection limit before allowing MQTT connection
+    const connectionId = `ws_${Date.now()}_${Math.random().toString(36).substring(2, 10)}`;
+    if (!regionLimiter.checkConnection(clientIP, connectionId)) {
+      console.log(`[REGION] Rejecting connection from ${clientIP} - region limit exceeded`);
+      ws.terminate();
+      return;
+    }
+    
     console.log(`[WEBSOCKET] New WebSocket connection from ${clientIP}`);
   
   // Enable WebSocket ping/pong to keep connection alive
@@ -972,13 +1001,20 @@ httpServer.listen(WS_PORT, HOST, () => {
   console.log(`  1. Subscribers (Subscribe-only): ${subscriberUsers.size} user(s) configured`);
   console.log('     Usernames:', Array.from(subscriberUsers.keys()).join(', '));
   console.log('');
-  console.log('  2. Publishers (Publish-only):');
+console.log(`  2. Publishers (Publish-only):`);
   console.log('     Username: v1_{PUBLIC_KEY}');
   console.log('     Password: JWT token signed with Ed25519 private key');
   console.log('     Validation:');
   console.log('       - origin_id must match authenticated public key');
   if (EXPECTED_AUDIENCE) {
     console.log(`       - Token audience must be: ${EXPECTED_AUDIENCE}`);
+  }
+  console.log('');
+  if (regionConfig.enabled) {
+    console.log(`  3. IATA Region Limiting (Active):`);
+    console.log(`     Max ${regionConfig.maxClientsPerIata} publishers per IATA code`);
+  } else {
+    console.log('  3. IATA Region Limiting: DISABLED');
   }
   console.log('');
   console.log('Ready to accept connections...');
