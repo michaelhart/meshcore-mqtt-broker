@@ -28,6 +28,11 @@ function isValidIATACode(code: string): boolean {
   }
 }
 
+// Helper function to validate allowed IATA airport codes
+function isAllowedIATACode(code: string): boolean {
+  return abuseConfig.allowedIataCodes.length <= 0 || abuseConfig.allowedIataCodes.includes(code);
+}
+
 // Client types
 enum ClientType {
   SUBSCRIBER = 'subscriber',
@@ -363,6 +368,17 @@ aedes.authorizePublish = (client, packet, callback) => {
         console.log(`${logPrefix} [DISCONNECT] Location code: "${locationCode}"`);
         console.log(`${logPrefix} [DISCONNECT] Full topic: "${packet.topic}"`);
         callback(new Error('Location must be a valid IATA international airport code or "test"'));
+        client.close();
+        return;
+      }
+
+      // Then check if it's a whitelisted IATA code
+      if (!isAllowedIATACode(locationCode)) {
+        console.log(`${logPrefix} [AUTHZ] ✗ Publish denied -> ${packet.topic} (blocked IATA)`);
+        console.log(`${logPrefix} [DISCONNECT] Closing client - Blocked IATA code`);
+        console.log(`${logPrefix} [DISCONNECT] Location code: "${locationCode}"`);
+        console.log(`${logPrefix} [DISCONNECT] Full topic: "${packet.topic}"`);
+        callback(new Error('Location must be an allowed IATA international airport code or "test"'));
         client.close();
         return;
       }
