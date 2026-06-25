@@ -1,4 +1,4 @@
-import Aedes from 'aedes';
+import { Aedes } from 'aedes';
 import { createServer } from 'http';
 import { WebSocketServer } from 'ws';
 import { Duplex } from 'stream';
@@ -111,7 +111,7 @@ if (subscriberUsers.size === 0) {
 }
 
 // Create Aedes MQTT broker
-const aedes = new Aedes();
+const aedes = await Aedes.createBroker();
 
 // Rate limiting for failed connections
 const rateLimiter = new RateLimiter(60000, 10, 300000);
