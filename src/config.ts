@@ -41,6 +41,22 @@ export function loadSubscriberConfig() {
   };
 }
 
+// Validate and load scale configuration
+export function loadScaleConfig() {
+  validateRequiredEnvVars([
+      'ENABLE_SCALE',
+  ])
+
+  return {
+    enableScale: process.env.ENABLE_SCALE === 'true',
+    redisHost: process.env.SCALE_REDIS_HOST || null,
+    redisPort: parseInt(process.env.SCALE_REDIS_PORT || '6379'),
+    redisPassword: process.env.SCALE_REDIS_PASSWORD || null,
+    redisDb: parseInt(process.env.SCALE_REDIS_DB || '0'),
+    instanceId: parseInt(process.env.SCALE_INSTANCE_ID || '0')
+  }
+}
+
 // Validate and load abuse detection configuration
 export function loadAbuseConfig(): AbuseConfig {
   validateRequiredEnvVars([
