@@ -7,12 +7,13 @@ import { getAirportInfo } from 'airport-utils';
 import { RateLimiter } from './rate-limiter';
 import { getClientIP } from './ip-utils';
 import { AbuseDetector } from './abuse-detector';
-import { loadMqttConfig, loadAbuseConfig, loadSubscriberConfig } from './config';
+import { loadMqttConfig, loadAbuseConfig, loadSubscriberConfig, loadScaleConfig } from './config';
 
 // Load and validate configuration
 const mqttConfig = loadMqttConfig();
 const abuseConfig = loadAbuseConfig();
 const subscriberConfig = loadSubscriberConfig();
+const scaleConfig = loadScaleConfig();
 
 const WS_PORT = mqttConfig.wsPort;
 const HOST = mqttConfig.host;
@@ -110,8 +111,37 @@ if (subscriberUsers.size === 0) {
   console.log(`[CONFIG] Default max connections per subscriber: ${subscriberConfig.defaultMaxConnections}`);
 }
 
+// @ts-ignore
+async function importAndCall(mod, params) {
+    const imported = await import(mod)
+    return imported.default(params)
+}
+
+// Prepare mqemitter and persistence
+let mqemitter = null;
+let persistence = null;
+let instanceID = 0;
+if (scaleConfig.enableScale) {
+    mqemitter = await importAndCall('mqemitter-redis', {
+        host: scaleConfig.redisHost,
+        port: scaleConfig.redisPort,
+        password: scaleConfig.redisPassword,
+        db: scaleConfig.redisDb,
+    });
+    persistence = await importAndCall('aedes-persistence-redis', {
+        host: scaleConfig.redisHost,
+        port: scaleConfig.redisPort,
+        password: scaleConfig.redisPassword,
+        db: scaleConfig.redisDb,
+    });
+    instanceID = scaleConfig.instanceId
+}
 // Create Aedes MQTT broker
-const aedes = await Aedes.createBroker();
+const broker = await Aedes.createBroker({
+    id: 'MCMQTTBROKER_' + instanceID,
+    mq: mqemitter,
+    persistence: persistence,
+});
 
 // Rate limiting for failed connections
 const rateLimiter = new RateLimiter(60000, 10, 300000);
@@ -133,7 +163,7 @@ function getClientLogPrefix(client: any): string {
 }
 
 // Authentication handler
-aedes.authenticate = async (client, username, password, callback) => {
+broker.authenticate = async (client, username, password, callback) => {
   const logPrefix = `[C:${client.id}]`;
   console.log(`${logPrefix} [AUTH] Authentication attempt - Username: ${username}`);
 
@@ -249,7 +279,7 @@ aedes.authenticate = async (client, username, password, callback) => {
 };
 
 // Authorization handler (control topic access)
-aedes.authorizePublish = (client, packet, callback) => {
+broker.authorizePublish = (client, packet, callback) => {
   if (!client) {
     callback(new Error('No client'));
     return;
@@ -556,7 +586,7 @@ aedes.authorizePublish = (client, packet, callback) => {
   callback(new Error('Unknown client type'));
 };
 
-aedes.authorizeSubscribe = (client, subscription, callback) => {
+broker.authorizeSubscribe = (client, subscription, callback) => {
   if (!client) {
     callback(new Error('No client'));
     return;
@@ -605,7 +635,7 @@ aedes.authorizeSubscribe = (client, subscription, callback) => {
 const lastStatusTimestamps = new Map<string, number>();
 
 // Authorization handler for forwarding messages to subscribers (filter sensitive data)
-aedes.authorizeForward = (client, packet) => {
+broker.authorizeForward = (client, packet) => {
   if (!client) {
     return packet;
   }
@@ -739,7 +769,7 @@ aedes.authorizeForward = (client, packet) => {
 };
 
 // Event handlers
-aedes.on('client', (client) => {
+broker.on('client', (client) => {
   // Link stream to client if available
   (client as any).stream = (client as any).conn;
   
@@ -768,7 +798,7 @@ aedes.on('client', (client) => {
   }
 });
 
-aedes.on('clientDisconnect', (client) => {
+broker.on('clientDisconnect', (client) => {
   const logPrefix = getClientLogPrefix(client);
   const connectedAt = (client as any).connectedAt;
   const duration = connectedAt ? Math.round((Date.now() - connectedAt) / 1000) : 'unknown';
@@ -793,7 +823,7 @@ aedes.on('clientDisconnect', (client) => {
   }
 });
 
-aedes.on('publish', (packet, client) => {
+broker.on('publish', (packet, client) => {
   if (client) {
     const logPrefix = getClientLogPrefix(client);
     console.log(`${logPrefix} [PUBLISH] ${packet.topic} (${packet.payload.length} bytes)`);
@@ -802,13 +832,13 @@ aedes.on('publish', (packet, client) => {
   }
 });
 
-aedes.on('subscribe', (subscriptions, client) => {
+broker.on('subscribe', (subscriptions, client) => {
   const logPrefix = getClientLogPrefix(client);
   console.log(`${logPrefix} [SUBSCRIBE] Attempting to subscribe to: ${subscriptions.map(s => s.topic).join(', ')}`);
 });
 
 // Log when client sends DISCONNECT packet (graceful disconnect)
-aedes.on('clientError', (client, err) => {
+broker.on('clientError', (client, err) => {
   const logPrefix = getClientLogPrefix(client);
   console.log(`${logPrefix} [ERROR] Client error: ${err.message}`);
 });
@@ -951,7 +981,7 @@ wsServer.on('connection', (ws, req) => {
   });
 
   // Pass the stream to Aedes
-  aedes.handle(stream);
+  broker.handle(stream);
   } catch (error) {
     console.error('[WEBSOCKET] Error handling connection:', error);
     try {
@@ -988,7 +1018,7 @@ httpServer.listen(WS_PORT, HOST, () => {
 process.on('SIGINT', () => {
   console.log('\n[SHUTDOWN] Closing MQTT broker...');
   abuseDetector.shutdown();
-  aedes.close(() => {
+  broker.close(() => {
     console.log('[SHUTDOWN] Broker closed');
     process.exit(0);
   });
@@ -997,7 +1027,7 @@ process.on('SIGINT', () => {
 process.on('SIGTERM', () => {
   console.log('\n[SHUTDOWN] Closing MQTT broker...');
   abuseDetector.shutdown();
-  aedes.close(() => {
+  broker.close(() => {
     console.log('[SHUTDOWN] Broker closed');
     process.exit(0);
   });
