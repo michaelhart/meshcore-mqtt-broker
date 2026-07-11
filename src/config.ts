@@ -77,6 +77,8 @@ export function loadAbuseConfig(): AbuseConfig {
     topicHistoryWindowMs: parseInt(process.env.ABUSE_TOPIC_HISTORY_WINDOW_MS!),
     persistencePath: process.env.ABUSE_PERSISTENCE_PATH!,
     persistenceIntervalMs: parseInt(process.env.ABUSE_PERSISTENCE_INTERVAL_MS!),
+    // Optional; defaults to 7 days. Clients with no activity within this window are evicted.
+    stateRetentionMs: parseInt(process.env.ABUSE_STATE_RETENTION_MS || '604800000'),
     enforcementEnabled: process.env.ABUSE_ENFORCEMENT_ENABLED === 'true',
   };
 }

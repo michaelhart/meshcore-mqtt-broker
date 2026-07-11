@@ -128,7 +128,10 @@ export interface AbuseConfig {
   // Persistence
   persistencePath: string;
   persistenceIntervalMs: number;
-  
+  // Trust state is retained only for clients active within this window; older state is
+  // evicted from memory and disk on each save so the store stays bounded by active clients.
+  stateRetentionMs: number;
+
   // Enforcement
   enforcementEnabled: boolean;
 }
@@ -239,17 +242,19 @@ export class AbuseDetector {
   }
 
   private loadFromDatabase(): void {
-    const stmt = this.db.prepare('SELECT public_key, state_json FROM trust_states');
-    const rows = stmt.all() as { public_key: string; state_json: string }[];
-    
+    // Only load state for clients active within the retention window, and iterate rather than
+    // materialising the whole table, so a large historical DB can never exhaust the heap on load.
+    const cutoff = Date.now() - this.config.stateRetentionMs;
+    const stmt = this.db.prepare('SELECT public_key, state_json FROM trust_states WHERE updated_at >= ?');
+
     let loaded = 0;
-    for (const row of rows) {
+    for (const row of stmt.iterate(cutoff) as Iterable<{ public_key: string; state_json: string }>) {
       try {
         const serialized: SerializedTrustState = JSON.parse(row.state_json);
         const state = this.deserializeTrustState(serialized);
         this.clients.set(row.public_key, state);
         loaded++;
-        
+
         if (state.status === 'muted') {
           this.stats.totalClientsMuted++;
         }
@@ -257,7 +262,7 @@ export class AbuseDetector {
         console.error(`[ABUSE] Failed to load trust state for ${row.public_key}:`, error);
       }
     }
-    
+
     console.log(`[ABUSE] Loaded ${loaded} trust states from database`);
   }
 
@@ -266,22 +271,38 @@ export class AbuseDetector {
       INSERT OR REPLACE INTO trust_states (public_key, state_json, updated_at)
       VALUES (?, ?, ?)
     `);
-    
+
+    const del = this.db.prepare('DELETE FROM trust_states WHERE public_key = ?');
     const now = Date.now();
+    const cutoff = now - this.config.stateRetentionMs;
     let saved = 0;
-    
+    let evicted = 0;
+
     for (const [publicKey, state] of this.clients.entries()) {
+      // Evict clients idle beyond the retention window from memory and disk so the store stays
+      // bounded by active clients rather than every client ever seen.
+      if (state.lastPacketAt < cutoff) {
+        this.clients.delete(publicKey);
+        del.run(publicKey);
+        evicted++;
+        continue;
+      }
       try {
         const serialized = this.serializeTrustState(state);
-        stmt.run(publicKey, JSON.stringify(serialized), now);
+        // Persist the client's real last-activity time as updated_at so retention (load filter
+        // and the delete below) is driven by activity, not by when the row was last written.
+        stmt.run(publicKey, JSON.stringify(serialized), state.lastPacketAt);
         saved++;
       } catch (error) {
         console.error(`[ABUSE] Failed to save trust state for ${publicKey}:`, error);
       }
     }
-    
-    if (saved > 0) {
-      console.log(`[ABUSE] Saved ${saved} trust states to database`);
+
+    // Sweep any orphaned rows for clients not currently tracked in memory (bounds disk).
+    this.db.prepare('DELETE FROM trust_states WHERE updated_at < ?').run(cutoff);
+
+    if (saved > 0 || evicted > 0) {
+      console.log(`[ABUSE] Saved ${saved} trust states to database (evicted ${evicted} stale)`);
     }
   }
 
