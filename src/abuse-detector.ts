@@ -7,6 +7,12 @@ import Database from 'better-sqlite3';
 // keepalives. anomalyCount (a counter) still tracks the lifetime total.
 const MAX_STORED_ANOMALIES = 100;
 
+// Peak-rate tracking window. Only the last 10s (current rate) and last hour
+// (peak decay) are ever read, so anything past an hour is dead weight.
+const RATE_WINDOW_MS = 3600000;
+// Defensive bound on the per-client timestamp array (10 pkt/s for a full hour)
+const MAX_RATE_WINDOW_ENTRIES = 36000;
+
 // ============================================================================
 // Type Definitions
 // ============================================================================
@@ -362,11 +368,23 @@ export class AbuseDetector {
     // Initialize peakRateWindow if missing
     if (!state.peakRateWindow || !state.peakRateWindow.version || state.peakRateWindow.version < 1) {
       state.peakRateWindow = {
-        version: 1,
+        version: 2,
         packets: [],
-        windowMs: 86400000,
+        windowMs: RATE_WINDOW_MS,
       };
       state.peakRateObserved = 0; // Reset bad old values
+    }
+
+    // v1 -> v2: shrink the rate window from 24h to 1h. Rate checks only ever
+    // read the last 10s (current rate) and last hour (peak decay), but the 24h
+    // window stored a timestamp per packet - the bulk of the persisted state.
+    if (state.peakRateWindow.version < 2) {
+      const cutoff = Date.now() - RATE_WINDOW_MS;
+      state.peakRateWindow.packets = state.peakRateWindow.packets.filter(
+        (timestamp: number) => timestamp > cutoff
+      );
+      state.peakRateWindow.windowMs = RATE_WINDOW_MS;
+      state.peakRateWindow.version = 2;
     }
     
     // Reset clock tracking if version is old or missing
@@ -455,9 +473,9 @@ export class AbuseDetector {
       avgPacketSize: 0,
       peakRateObserved: 0,
       peakRateWindow: {
-        version: 1,
+        version: 2,
         packets: [],
-        windowMs: 86400000, // 24 hours
+        windowMs: RATE_WINDOW_MS,
       },
     };
 
@@ -542,11 +560,14 @@ export class AbuseDetector {
     // Track packet rate over 24h window
     state.peakRateWindow.packets.push(now);
     
-    // Clean old packets outside 24h window
+    // Clean old packets outside the window
     const windowStart = now - state.peakRateWindow.windowMs;
     state.peakRateWindow.packets = state.peakRateWindow.packets.filter(
       (timestamp: number) => timestamp > windowStart
     );
+    if (state.peakRateWindow.packets.length > MAX_RATE_WINDOW_ENTRIES) {
+      state.peakRateWindow.packets = state.peakRateWindow.packets.slice(-MAX_RATE_WINDOW_ENTRIES);
+    }
     
     // Calculate current rate (packets in last 10 seconds)
     const tenSecondsAgo = now - 10000;
