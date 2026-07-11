@@ -1,6 +1,12 @@
 import { createHash } from 'crypto';
 import Database from 'better-sqlite3';
 
+// Cap the per-client anomaly log. Without a bound, chronically noisy clients
+// accumulate multi-MB logs that the synchronous 5-minute save cycle must
+// JSON.stringify, stalling the event loop long enough to flap subscriber
+// keepalives. anomalyCount (a counter) still tracks the lifetime total.
+const MAX_STORED_ANOMALIES = 100;
+
 // ============================================================================
 // Type Definitions
 // ============================================================================
@@ -372,7 +378,13 @@ export class AbuseDetector {
       state.anomalyCount = 0;
       state.anomalies = [];
     }
-    
+
+    // Trim anomaly logs persisted before the cap existed (multi-MB rows made
+    // the synchronous save cycle stall the event loop)
+    if (state.anomalies.length > MAX_STORED_ANOMALIES) {
+      state.anomalies = state.anomalies.slice(-MAX_STORED_ANOMALIES);
+    }
+
     return state;
   }
 
@@ -776,6 +788,12 @@ export class AbuseDetector {
       details,
       timestamp: Date.now(),
     });
+
+    // Keep only the most recent entries - anomalyCount carries the total for
+    // threshold checks, so the log is purely diagnostic
+    if (state.anomalies.length > MAX_STORED_ANOMALIES) {
+      state.anomalies.shift();
+    }
 
     console.log(`[ABUSE] [${state.publicKey.substring(0, 8)}] Anomaly: ${type} - ${details}`);
 
