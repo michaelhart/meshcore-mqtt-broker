@@ -1,5 +1,6 @@
 import { config as dotenvConfig } from 'dotenv';
 import { AbuseConfig } from './abuse-detector';
+import { IataLimiterConfig } from './region-limiter';
 
 // Load environment variables
 dotenvConfig();
@@ -38,6 +39,14 @@ export function loadSubscriberConfig() {
 
   return {
     defaultMaxConnections: parseInt(process.env.SUBSCRIBER_MAX_CONNECTIONS_DEFAULT!),
+  };
+}
+
+// Validate and load IATA limiter configuration
+export function loadRegionConfig(): IataLimiterConfig {
+  return {
+    enabled: process.env.REGION_ENFORCEMENT_ENABLED === 'true',
+    maxClientsPerIata: parseInt(process.env.REGION_MAX_CLIENTS_PER_IATA || '3'),
   };
 }
 
