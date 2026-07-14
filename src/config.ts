@@ -20,13 +20,12 @@ export function loadMqttConfig() {
   validateRequiredEnvVars([
     'MQTT_WS_PORT',
     'MQTT_HOST',
-    'AUTH_EXPECTED_AUDIENCE',
   ]);
 
   return {
     wsPort: parseInt(process.env.MQTT_WS_PORT!),
     host: process.env.MQTT_HOST!,
-    expectedAudience: process.env.AUTH_EXPECTED_AUDIENCE!,
+    expectedAudience: (process.env.AUTH_EXPECTED_AUDIENCE || '').trim(),
   };
 }
 
@@ -82,4 +81,3 @@ export function loadAbuseConfig(): AbuseConfig {
     enforcementEnabled: process.env.ABUSE_ENFORCEMENT_ENABLED === 'true',
   };
 }
-
