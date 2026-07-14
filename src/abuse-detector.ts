@@ -130,8 +130,9 @@ export interface AbuseConfig {
   maxTopicsPerDay: number;
   anomalyThreshold: number;
   
-  // IATA change detection
+  // IATA detection
   maxIataChanges24h: number;
+  allowedIataCodes: string[];
   
   // Topic tracking
   topicHistorySize: number;
