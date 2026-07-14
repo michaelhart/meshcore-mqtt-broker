@@ -7,3 +7,4 @@ data/
 *.db
 *.db-shm
 *.db-wal
+docker-compose.test.yaml

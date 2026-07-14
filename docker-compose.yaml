@@ -1,0 +1,24 @@
+services:
+  meshcore-mqtt-broker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: meshcore-mqtt-broker
+    ports:
+      - "8883:8883"
+    volumes:
+      - ./data:/data
+      - ./.env:/app/.env:ro
+    environment:
+      - SCALE_INSTANCE_ID=1
+    depends_on:
+      - redis
+
+  redis:
+    container_name: meshcore-mqtt-broker-redis
+    hostname: meshcore-mqtt-broker-redis
+    image: redis:latest
+    ports:
+      - "6379:6379"
+    volumes:
+      - ./redis:/data
