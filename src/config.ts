@@ -27,6 +27,7 @@ export function loadMqttConfig() {
     wsPort: parseInt(process.env.MQTT_WS_PORT!),
     host: process.env.MQTT_HOST!,
     expectedAudience: process.env.AUTH_EXPECTED_AUDIENCE!,
+    allowedRegions: process.env.ALLOWED_REGIONS?.split(',').map(r => r.trim().toUpperCase()) || null,
   };
 }
 

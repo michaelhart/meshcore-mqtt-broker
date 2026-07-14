@@ -17,6 +17,7 @@ const subscriberConfig = loadSubscriberConfig();
 const WS_PORT = mqttConfig.wsPort;
 const HOST = mqttConfig.host;
 const EXPECTED_AUDIENCE = mqttConfig.expectedAudience;
+const ALLOWED_REGIONS = mqttConfig.allowedRegions;
 
 // Helper function to validate IATA airport codes
 function isValidIATACode(code: string): boolean {
@@ -364,6 +365,16 @@ aedes.authorizePublish = (client, packet, callback) => {
         console.log(`${logPrefix} [DISCONNECT] Full topic: "${packet.topic}"`);
         callback(new Error('Location must be a valid IATA international airport code or "test"'));
         client.close();
+        return;
+      }
+    }
+    
+    // Filter by allowed regions if configured
+    if (ALLOWED_REGIONS && !isTestRegion) {
+      const normalizedRegion = locationCode.toUpperCase();
+      if (!ALLOWED_REGIONS.includes(normalizedRegion)) {
+        console.debug(`${logPrefix} [AUTHZ] ✗ Publish denied -> ${packet.topic} (region ${normalizedRegion} not in allowed list: ${ALLOWED_REGIONS.join(', ')})`);
+        callback(new Error(`Region ${normalizedRegion} is not allowed on this broker`));
         return;
       }
     }
