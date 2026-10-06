@@ -7,12 +7,23 @@ import { getAirportInfo } from 'airport-utils';
 import { RateLimiter } from './rate-limiter';
 import { getClientIP } from './ip-utils';
 import { AbuseDetector } from './abuse-detector';
-import { loadMqttConfig, loadAbuseConfig, loadSubscriberConfig } from './config';
+import { loadMqttConfig, loadAbuseConfig, loadSubscriberConfig, loadClientRxConfig } from './config';
+import {
+  clientRxTopic,
+  describeTokenClaims,
+  findUnknownClientRxSubscribers,
+  formatTokenClaimShape,
+  isClientRxNamespace,
+  parseClientRxTopic,
+  shouldForwardClientRx,
+  validateClientRxToken,
+} from './client-rx';
 
 // Load and validate configuration
 const mqttConfig = loadMqttConfig();
 const abuseConfig = loadAbuseConfig();
 const subscriberConfig = loadSubscriberConfig();
+const clientRxConfig = loadClientRxConfig();
 
 const WS_PORT = mqttConfig.wsPort;
 const HOST = mqttConfig.host;
@@ -110,6 +121,25 @@ if (subscriberUsers.size === 0) {
   console.log(`[CONFIG] Default max connections per subscriber: ${subscriberConfig.defaultMaxConnections}`);
 }
 
+// Checked here rather than in loadClientRxConfig(): the SUBSCRIBER_n table is
+// only known once the loop above has run.
+const unknownClientRxSubscribers = findUnknownClientRxSubscribers(
+  clientRxConfig.subscribers,
+  new Set(subscriberUsers.keys())
+);
+if (unknownClientRxSubscribers.length > 0) {
+  console.warn(
+    `[CONFIG] CLIENT_RX_SUBSCRIBERS lists ${unknownClientRxSubscribers.length} name(s) with no matching SUBSCRIBER_n: ` +
+    `${unknownClientRxSubscribers.join(', ')} - they will never receive anything`
+  );
+}
+
+console.log(
+  `[CONFIG] Client RX topics: ${clientRxConfig.enabled ? 'enabled' : 'disabled'} ` +
+  `(allowlisted subscribers: ${clientRxConfig.subscribers.length}, ` +
+  `max token lifetime: ${clientRxConfig.maxTokenLifetimeS}s, clock skew: ${clientRxConfig.clockSkewS}s)`
+);
+
 // Create Aedes MQTT broker
 const aedes = new Aedes();
 
@@ -204,15 +234,13 @@ aedes.authenticate = async (client, username, password, callback) => {
     }
 
     // Verify the auth token using meshcore-decoder
+    // The token is a bearer credential: never log the token, its hex dump or
+    // its signature, not even at debug level.
     const tokenPayload = await verifyAuthToken(passwordStr, publicKey);
-    console.debug(`${logPrefix} [AUTH] Token input: "${passwordStr}"`);
 
-    
     if (!tokenPayload) {
       console.log(`${logPrefix} [AUTH] ✗ Invalid token signature`);
-      console.debug(`${logPrefix} [AUTH] Token input: "${passwordStr}"`);      
       console.debug(`${logPrefix} [AUTH] Public key: ${publicKey}`);
-      console.debug(`${logPrefix} [AUTH] Token hex: ${Buffer.from(passwordStr).toString('hex')}`);
       callback(null, false);
       return;
     }
@@ -226,6 +254,10 @@ aedes.authenticate = async (client, username, password, callback) => {
     
     const shortKey = publicKey.substring(0, 8);
     console.log(`[O:${shortKey}] [AUTH] ✓ Publisher authenticated${tokenPayload.aud ? ` [aud: ${tokenPayload.aud}]` : ''}`);
+    // Measurement only: the shape of the token claims, never the token, the
+    // signature or the payload. Lets an operator see how many publishers
+    // already send `exp` before deciding to require it everywhere.
+    console.log(`[O:${shortKey}] [AUTH] [CLAIMS] ${formatTokenClaimShape(describeTokenClaims(tokenPayload))}`);
     // Store the public key and client type with the client for later use
     (client as any).publicKey = publicKey;
     (client as any).tokenPayload = tokenPayload;
@@ -308,6 +340,78 @@ aedes.authorizePublish = (client, packet, callback) => {
     if (!packet.topic.startsWith('meshcore/')) {
       console.log(`${logPrefix} [AUTHZ] ✗ Publish denied -> ${packet.topic} (not meshcore/*)`);
       callback(new Error('Publishers can only publish to meshcore/* topics'));
+      return;
+    }
+
+    // Client reported RX coverage: meshcore/client/{PUBLIC_KEY}/packets
+    // Handled before the IATA format below, because these topics carry no
+    // location code and nothing in the namespace may fall through to it.
+    if (isClientRxNamespace(packet.topic)) {
+      if (!clientRxConfig.enabled) {
+        console.log(`${logPrefix} [AUTHZ] ✗ Publish denied -> ${packet.topic} (client RX topics disabled)`);
+        callback(new Error('Client RX topics are not enabled on this broker'));
+        return;
+      }
+
+      const clientRxTarget = parseClientRxTopic(packet.topic);
+      if (!clientRxTarget) {
+        console.log(`${logPrefix} [AUTHZ] ✗ Publish denied -> ${packet.topic} (invalid client RX topic)`);
+        callback(new Error('Client RX topic must be meshcore/client/{PUBLIC_KEY}/packets'));
+        return;
+      }
+
+      const authenticatedKey = ((client as any).publicKey || '').toUpperCase();
+      if (clientRxTarget.publicKey !== authenticatedKey) {
+        console.log(`${logPrefix} [AUTHZ] ✗ Publish denied -> ${packet.topic} (pubkey mismatch)`);
+        console.log(`${logPrefix} [DISCONNECT] Closing client - Public key mismatch on client RX topic`);
+        callback(new Error('Public key in topic must match authenticated public key'));
+        client.close();
+        return;
+      }
+
+      // Client RX payloads carry a precise position: never keep them in the
+      // broker's retained store.
+      if (packet.retain) {
+        console.log(`${logPrefix} [AUTHZ] ✗ Publish denied -> ${packet.topic} (retained client RX publish)`);
+        callback(new Error('Client RX packets cannot be retained'));
+        return;
+      }
+
+      // The decoder only checks `exp` when the claim is present, and a long
+      // lived connection can outlive its token, so the time claims are
+      // re-checked on every client RX publish.
+      const tokenCheck = validateClientRxToken(
+        (client as any).tokenPayload,
+        Math.floor(Date.now() / 1000),
+        clientRxConfig
+      );
+      if (!tokenCheck.ok) {
+        console.log(`${logPrefix} [AUTHZ] ✗ Publish denied -> ${packet.topic} (token ${tokenCheck.reason})`);
+        console.log(`${logPrefix} [DISCONNECT] Closing client - Client RX token rejected (${tokenCheck.reason})`);
+        callback(new Error(`Client RX token rejected: ${tokenCheck.reason}`));
+        client.close();
+        return;
+      }
+
+      // Normalize the public key so one client cannot create two topics.
+      const normalizedClientRxTopic = clientRxTopic(clientRxTarget.publicKey);
+      if (packet.topic !== normalizedClientRxTopic) {
+        console.log(`${logPrefix} [AUTHZ] Normalized topic: ${packet.topic} -> ${normalizedClientRxTopic}`);
+        packet.topic = normalizedClientRxTopic;
+      }
+
+      // Feed the abuse detector so the duplicate/rate/size counters stay
+      // accurate for this client. As on the observer path, this is tracking
+      // only: nothing here refuses the publish. IATA validation and IATA
+      // change tracking are skipped - there is no location code in this
+      // namespace.
+      const clientRxTrustState = abuseDetector.getClientStats(authenticatedKey);
+      if (clientRxTrustState) {
+        abuseDetector.recordPacket(client, packet);
+      }
+
+      console.log(`${logPrefix} [AUTHZ] ✓ Publish authorized (client RX) -> ${packet.topic}`);
+      callback(null);
       return;
     }
 
@@ -591,6 +695,27 @@ aedes.authorizeSubscribe = (client, subscription, callback) => {
   
   // Subscriber clients can subscribe to any topic (they're listeners)
   if (clientType === ClientType.SUBSCRIBER) {
+    // An explicit subscription inside the client RX namespace is refused for
+    // subscribers that are not allowlisted, so a misconfigured consumer fails
+    // loudly instead of silently receiving nothing. Wildcard subscriptions such
+    // as meshcore/# are still accepted and filtered per packet on forward.
+    // Only enforced while the feature is enabled, so a broker without client RX
+    // keeps answering subscriptions exactly as before.
+    if (
+      clientRxConfig.enabled &&
+      isClientRxNamespace(subscription.topic) &&
+      !clientRxConfig.subscribers.includes((client as any).username || '')
+    ) {
+      console.log(`${logPrefix} [AUTHZ] ✗ Subscribe denied (client RX not allowlisted) -> ${subscription.topic}`);
+      // callback(null, null) refuses this one filter with a negative SUBACK
+      // (0x80). Refusing with an Error would make aedes drop the whole
+      // connection, which would take every other topic in the same SUBSCRIBE
+      // down with it - an admin dashboard that subscribes to a topic list
+      // including meshcore/client/# would lose all of its subscriptions.
+      callback(null, null);
+      return;
+    }
+
     console.log(`${logPrefix} [AUTHZ] ✓ Subscribe authorized -> ${subscription.topic}`);
     callback(null, subscription);
     return;
@@ -612,6 +737,23 @@ aedes.authorizeForward = (client, packet) => {
   
   const clientType = (client as any).clientType;
   const role = (client as any).role;
+  
+  // Client RX coverage carries precise positions, so it is only delivered to
+  // the subscriber usernames in CLIENT_RX_SUBSCRIBERS. Checked per packet so a
+  // wildcard subscription (meshcore/#) cannot sidestep the allowlist, and with
+  // no exemption for admins (role 1) or publishers.
+  if (
+    !shouldForwardClientRx(
+      packet.topic,
+      {
+        isSubscriber: clientType === ClientType.SUBSCRIBER,
+        username: (client as any).username,
+      },
+      clientRxConfig.subscribers
+    )
+  ) {
+    return null; // Block delivery of this message
+  }
   
   // Block $SYS/* messages for non-admin subscribers (only role 1 can see system topics)
   if (clientType === ClientType.SUBSCRIBER && role !== SubscriberRole.ADMIN) {
@@ -985,20 +1127,42 @@ httpServer.listen(WS_PORT, HOST, () => {
 });
 
 // Graceful shutdown
-process.on('SIGINT', () => {
-  console.log('\n[SHUTDOWN] Closing MQTT broker...');
-  abuseDetector.shutdown();
-  aedes.close(() => {
-    console.log('[SHUTDOWN] Broker closed');
-    process.exit(0);
-  });
-});
+let closing = false;
 
-process.on('SIGTERM', () => {
-  console.log('\n[SHUTDOWN] Closing MQTT broker...');
+/**
+ * Stop accepting connections, flush abuse detection state and release the
+ * listening socket. Exported so an embedder (or a test) can shut the broker
+ * down without killing the process.
+ */
+export function closeBroker(): Promise<void> {
+  if (closing) {
+    return Promise.resolve();
+  }
+  closing = true;
+
   abuseDetector.shutdown();
-  aedes.close(() => {
+
+  return new Promise((resolve) => {
+    aedes.close(() => {
+      for (const ws of wsServer.clients) {
+        ws.terminate();
+      }
+      wsServer.close(() => {
+        httpServer.close(() => resolve());
+      });
+    });
+  });
+}
+
+function shutdownAndExit(): void {
+  console.log('\n[SHUTDOWN] Closing MQTT broker...');
+  closeBroker().then(() => {
     console.log('[SHUTDOWN] Broker closed');
     process.exit(0);
   });
-});
+}
+
+process.on('SIGINT', shutdownAndExit);
+process.on('SIGTERM', shutdownAndExit);
+
+export { aedes, httpServer };
